@@ -3,20 +3,20 @@ name: Run OpenPoker Bot 24/7
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */2 * * *' # Backup trigger every 2 hours in case a run fails
+    - cron: '0 */2 * * *' # Backup trigger every 2 hours
 
 permissions:
-  actions: write # Required for `gh workflow run` to trigger the next job
+  actions: write
   contents: read
 
 concurrency:
   group: openpoker-bot
-  cancel-in-progress: false # Prevents the scheduled cron from killing an active game
+  cancel-in-progress: false
 
 jobs:
   play-poker:
     runs-on: ubuntu-latest
-    timeout-minutes: 125 # Hard ceiling at 2h 05m
+    timeout-minutes: 125
 
     steps:
       - name: Checkout code
@@ -26,7 +26,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip' # Speeds up startup by caching wheels between runs
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -34,6 +34,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Bot (2-Hour Cycle)
+        id: run-bot
         env:
           OPEN_POKER_API_KEY: ${{ secrets.OPEN_POKER_API_KEY }}
           CPU_WORKERS: "2"
@@ -41,11 +42,20 @@ jobs:
           MC_MAX_ITERS: "700000"
           BUY_IN_AMOUNT: "1500"
           PROFIT_LOCK_STACK: "5000"
-        # timeout 115m stops cleanly so the next step can trigger the loop
-        run: timeout 115m python -u bot.py || true
+        # We record the start time to ensure it doesn't loop instantly on quick crashes
+        run: |
+          START_TIME=$(date +%s)
+          echo "start_time=$START_TIME" >> $GITHUB_OUTPUT
+          
+          timeout 115m python -u bot.py || true
+          
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
 
-      - name: Immediately Trigger Next 2-Hour Run
-        if: success() || failure()
+      - name: Safely Trigger Next 2-Hour Run
+        # ONLY triggers if the bot ran for at least 5 minutes (prevents rapid-fire loops)
+        if: always() && steps.run-bot.outputs.duration > 300
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run "Run OpenPoker Bot 24/7"
