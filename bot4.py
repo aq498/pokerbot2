@@ -1054,11 +1054,26 @@ class OpenPokerClientV4:
         if "dealer_seat" in msg or "button_seat" in msg:
             self.dealer_seat = msg.get("dealer_seat", msg.get("button_seat", self.dealer_seat))
 
+        # --- MULTI-SOURCE STACK & PROFIT-LOCK CHECK ---
+        for key in ("stack", "chips", "max_raise", "balance"):
+            if key in msg and msg[key] is not None:
+                val = int(msg[key])
+                if val > self.my_stack:
+                    self.my_stack = val
+
         for va in valid_actions:
             if va.get("action") in ("raise", "bet") and va.get("max"):
-                self.my_stack = max(self.my_stack, int(va["max"]))
-                if self.my_stack >= PROFIT_LOCK_STACK:
-                    self.pending_rathole = True
+                val = int(va["max"])
+                if val > self.my_stack:
+                    self.my_stack = val
+            if va.get("stack"):
+                val = int(va["stack"])
+                if val > self.my_stack:
+                    self.my_stack = val
+
+        if self.my_stack >= PROFIT_LOCK_STACK:
+            self.pending_rathole = True
+        # ---------------------------------------------
 
         position = self.get_my_position(self.my_seat, self.players)
 
