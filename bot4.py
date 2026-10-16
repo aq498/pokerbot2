@@ -18,7 +18,7 @@ from treys import Card, Evaluator, Deck
 # =====================================================================
 # 1. CONFIGURATION & ENVIRONMENT
 # =====================================================================
-API_KEY = os.getenv("OPEN_POKER_API_KEY", "")
+API_KEY = os.getenv("OPEN_POKER_API_KEY", "sO03ApKecoElfE0-GfeMQC7GI4XJ-0qjX_2vGtXXbjQ")
 WS_URL = os.getenv("OPEN_POKER_WS_URL", "wss://openpoker.ai/ws")
 REST_BASE_URL = os.getenv("OPEN_POKER_REST_URL", "https://openpoker.ai")
 PORT = int(os.getenv("PORT", 10000))
@@ -740,12 +740,18 @@ class PokerEngineV4Adaptive:
             stack_bb = effective_stack / big_blind if big_blind > 0 else 75
             is_unopened = to_call <= big_blind
 
+            # Rule 0: Free check safeguard - NEVER fold when checking costs 0
+            if to_call == 0:
+                return finish("check", 0)
+
+            # Short-stack push/fold (< 12 BB)
             if stack_bb <= 12:
                 if pf_score >= 78 or (pf_score >= 70 and position in ("BTN", "SB", "CO")):
                     return finish("raise", max_raise)
                 return finish("check" if to_call == 0 else "fold", 0)
 
-            if is_unopened:
+            # Unopened pot or unraised limps
+if is_unopened:
                 open_size = int(big_blind * 2.5) if position != "SB" else int(big_blind * 3.0)
                 if position == "UTG" and pf_score >= 78:
                     return finish("raise", open_size)
@@ -759,10 +765,13 @@ class PokerEngineV4Adaptive:
                     if pf_score >= 82:
                         return finish("raise", int(big_blind * 3.0))
                     return finish("check" if to_call == 0 else "call", to_call)
-                if position == "SB" and to_call <= big_blind // 2 and pf_score >= 54:
-                    return finish("call", to_call)
+                # SB Completing unraised pots/limps: very cheap (half blind), play any suited or playable hand
+                if position == "SB":
+                    if pf_score >= 48 or hand_str.endswith("s"):
+                        return finish("call", to_call)
                 return finish("check" if to_call == 0 else "fold", 0)
 
+            # Facing a shove or huge 4-bet (> 9 BB)
             if to_call > big_blind * 9:
                 if hand_str in ("AA", "KK"):
                     return finish("raise", max_raise)
@@ -770,6 +779,7 @@ class PokerEngineV4Adaptive:
                     return finish("call", to_call)
                 return finish("fold", 0)
 
+            # Facing a 3-bet (4.5 BB < to_call <= 9 BB)
             if to_call > big_blind * 4.5:
                 if hand_str in FOUR_BET_VALUE:
                     return finish("raise", int(to_call * 2.3))
@@ -777,6 +787,7 @@ class PokerEngineV4Adaptive:
                     return finish("call", to_call)
                 return finish("fold", 0)
 
+            # Facing a single open raise (to_call <= 4.5 BB)
             three_bet_size = int(to_call * (3.0 if in_position else 3.5))
             if tier == 1:
                 return finish("raise", three_bet_size)
@@ -790,10 +801,24 @@ class PokerEngineV4Adaptive:
             ):
                 return finish("raise", three_bet_size)
 
-            min_call_score = 64 if position == "BB" else (70 if in_position else 77)
-            if pf_score >= min_call_score and adj_equity >= (pot_odds + 0.03):
-                return finish("call", to_call)
+            # BB Defense: You already put in 1 BB and close the action with 3:1+ odds
+            # Defends A2s+, A9o+ (including A10o), all pairs, suited connectors, and Broadway
+            if position == "BB":
+                is_pocket_pair = hand_str[0] == hand_str[1]
+                if (pf_score >= 58 or is_pocket_pair) and to_call <= effective_stack * 0.10:
+                    return finish("call", to_call)
+
+            # SB / BTN / CO Defending vs cheap opens with suited connectors/gappers (e.g. 86s, 76s, 97s)
+            if position in ("BTN", "CO", "SB") and hand_str.endswith("s") and pf_score >= 60:
+                if to_call <= effective_stack * 0.05 and to_call <= big_blind * 2.5:
+                    return finish("call", to_call)
+
+            # Non-BB Call logic
             if hand_str[0] == hand_str[1] and effective_stack >= to_call * 12:
+                return finish("call", to_call)
+            if in_position and pf_score >= 70 and adj_equity >= pot_odds:
+                return finish("call", to_call)
+            if pf_score >= 77 and adj_equity >= (pot_odds + 0.02):
                 return finish("call", to_call)
 
             return finish("fold", 0)
@@ -949,11 +974,17 @@ class OpenPokerClientV4:
                     self.my_seat = pseat
                 if pid:
                     self.my_player_id = pid
-                stack_val = p.get("stack", p.get("chips"))
-                if stack_val is not None:
-                    self.my_stack = int(stack_val)
-                    if self.my_stack >= PROFIT_LOCK_STACK:
-                        self.pending_rathole = True
+                
+                # Check ALL possible stack key formats sent by OpenPoker server
+                for key in ("stack", "chips", "new_stack", "amount", "balance"):
+                    if key in p and p[key] is not None:
+                        val = int(p[key])
+                        if val > 0:
+                            self.my_stack = val
+                            break
+                            
+                if self.my_stack >= PROFIT_LOCK_STACK:
+                    self.pending_rathole = True
                 break
 
     async def execute_rathole_leave_and_rejoin(self, ws):
@@ -1232,13 +1263,14 @@ class OpenPokerClientV4:
                                     self.bot_name and w_name == self.bot_name
                                 ):
                                     self.hands_won += 1
-                                    if "new_stack" in w or "stack" in w:
-                                        self.my_stack = int(w.get("new_stack", w.get("stack")))
-                                    elif "amount" in w:
-                                        self.my_stack += int(w["amount"])
-
+                                    
                             if "players" in msg:
                                 self.update_hero_info_from_players(msg["players"])
+                            
+                            # Also check root level stack notification in hand finish
+                            for key in ("stack", "new_stack", "chips", "balance"):
+                                if key in msg and msg[key] is not None:
+                                    self.my_stack = int(msg[key])
 
                             if self.my_stack >= PROFIT_LOCK_STACK or self.pending_rathole:
                                 await self.execute_rathole_leave_and_rejoin(ws)
@@ -1379,7 +1411,13 @@ async def main():
 
 
 if __name__ == "__main__":
+    import sys
+
+    # Windows PowerShell fix: prevents socket errors and handles Ctrl+C cleanly
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[Shutdown] Bot v4.1 stopped.")
+    except (KeyboardInterrupt, SystemExit):
+        print("\n[Shutdown] Bot stopped cleanly.")
