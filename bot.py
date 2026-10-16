@@ -751,7 +751,7 @@ class PokerEngineV4Adaptive:
                 return finish("check" if to_call == 0 else "fold", 0)
 
             # Unopened pot or unraised limps
-if is_unopened:
+            if is_unopened:
                 open_size = int(big_blind * 2.5) if position != "SB" else int(big_blind * 3.0)
                 if position == "UTG" and pf_score >= 78:
                     return finish("raise", open_size)
